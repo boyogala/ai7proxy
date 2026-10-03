@@ -316,6 +316,33 @@ npm test
 
 ---
 
+## ❓ 常见问题排查 (FAQ)
+
+### Q1: 调用 Google Gemini API 提示 `Error: User location is not supported for the API use`，或访问 Google AI Studio 提示 `Failed to list models: permission denied. Please try again.`？
+
+- **根本原因**：
+  **这绝不是 ai7proxy 项目本身或代码的故障，而是部署该代理的 VPS 服务器的出站 IP 地址（物理机房 IP）不在 Google 等 AI 服务商支持的地区名单内，或被识别为受限制的机房/广播 IP。**
+
+  `ai7proxy` 在底层架构设计上严格清洗并剔除了客户端发来的 `cf-connecting-ip`、`x-forwarded-for` 和 `x-real-ip` 等客户端 IP 标头（以防止客户端真实物理地址泄露）。因此，Google、OpenAI、Anthropic 等上游服务商在进行地区合规（Geo-blocking）与安全风控检测时，**直接依据的是你部署代理的这台 Linux VPS 服务器本身的出口公网 IP**。如果这台 VPS 的 IP 属于不受官方支持的国家/地区（如部分未合规机房、中国大陆、中国香港部分未开放段等），Google API 会直接拒绝请求并返回该错误。
+
+- **快速验证方法**：
+  登录您的 VPS 终端，运行以下命令快速检查当前 VPS 的公网 IP 物理归属与对 Google API 的连通性：
+  ```bash
+  # 1. 查看当前 VPS 的真实公网出口 IP 与归属地
+  curl -s https://ipinfo.io/json
+
+  # 2. 检查 VPS 直连 Google 生成式 API 端点的连通响应
+  curl -I https://generativelanguage.googleapis.com
+  ```
+
+- **解决建议**：
+  1. **方案 1（推荐：选用合规原生机房）**：
+     将代理部署在位于 Google Gemini / OpenAI 官方支持地区（如美国、日本、新加坡、韩国、德国、英国等主流合规云数据中心）的 VPS 节点上。
+  2. **方案 2（VPS 配置 Cloudflare WARP 出站解锁）**：
+     若当前 VPS 无法更换，可在此 VPS 上配置 Cloudflare WARP 将对外发起的出站流量路由至合规地区，从而解锁 Google 地区限制。
+
+---
+
 ## 🛡️ License
 
 MIT License.
