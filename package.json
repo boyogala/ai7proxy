@@ -1,0 +1,25 @@
+{
+  "name": "ai7proxy",
+  "version": "2.0.0",
+  "description": "High-performance transparent proxy for OpenAI, Anthropic, Google, OpenRouter, xAI, OpenCode v2, and more.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "test": "tsx --test test/proxy.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "@hono/zod-validator": "^0.4.3",
+    "hono": "^4.7.5",
+    "undici": "^7.5.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
