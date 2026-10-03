@@ -323,23 +323,55 @@ npm test
 - **根本原因**：
   **这绝不是 ai7proxy 项目本身或代码的故障，而是部署该代理的 VPS 服务器的出站 IP 地址（物理机房 IP）不在 Google 等 AI 服务商支持的地区名单内，或被识别为受限制的机房/广播 IP。**
 
-  `ai7proxy` 在底层架构设计上严格清洗并剔除了客户端发来的 `cf-connecting-ip`、`x-forwarded-for` 和 `x-real-ip` 等客户端 IP 标头（以防止客户端真实物理地址泄露）。因此，Google、OpenAI、Anthropic 等上游服务商在进行地区合规（Geo-blocking）与安全风控检测时，**直接依据的是你部署代理的这台 Linux VPS 服务器本身的出口公网 IP**。如果这台 VPS 的 IP 属于不受官方支持的国家/地区（如部分未合规机房、中国大陆、中国香港部分未开放段等），Google API 会直接拒绝请求并返回该错误。
+  `ai7proxy` 在底层架构设计上严格清洗并剔除了客户端发来的 `cf-connecting-ip`、`x-forwarded-for` 和 `x-real-ip` 等客户端 IP 标头（以防止客户端真实物理地址泄露）。因此，Google、OpenAI、Anthropic 等上游服务商在进行地区合规（Geo-blocking）与安全风控检测时，**直接依据的是你部署代理的这台 Linux VPS 服务器本身的出口公网 IP**。如果这台 VPS 的 IP 属于不受官方支持的国家/地区（如中国大陆、中国香港大部分云厂商机房 IP 等），Google API 会直接在业务层拒绝请求并返回该错误。
 
-- **快速验证方法**：
-  登录您的 VPS 终端，运行以下命令快速检查当前 VPS 的公网 IP 物理归属与对 Google API 的连通性：
-  ```bash
-  # 1. 查看当前 VPS 的真实公网出口 IP 与归属地
-  curl -s https://ipinfo.io/json
-
-  # 2. 检查 VPS 直连 Google 生成式 API 端点的连通响应
-  curl -I https://generativelanguage.googleapis.com
+- **实战案例深度解析（网友常见排查误区）**：
+  有网友在 VPS 终端执行基础连通性探测时，发现返回如下信息：
+  ```text
+  root@VM-xxxx:~# curl -I https://generativelanguage.googleapis.com
+  HTTP/2 404
+  date: Sat, 03 Oct 2026 04:56:08 GMT
+  content-type: text/html; charset=UTF-8
+  server: scaffolding on HTTPServer2
+  content-length: 1561
+  ...
   ```
+  **很多开发者看到 `HTTP/2 404` 往往会误以为是“域名输入错误”、“域名挂了”或“网络不通”，这是极其普遍的认知误区！**
+  1. **网络传输层层面（物理链路 100% 畅通）**：
+     能收到 `HTTP/2 404` 以及 `server: scaffolding on HTTPServer2`（Google 官方接入网关代号），说明 **VPS 到 Google 官方服务器的底层 TCP 路由与 TLS 443 端口握手完全通畅，没有任何物理网络阻断**；
+  2. **为什么会返回 404？**
+     因为 Google 生成式 API 的根路径 `/` 本身就没有挂载任何网页或 index 资源，Google 接入层网关对根路径探测默认就是响应 404，这是完全正常的官方行为；
+  3. **真正的限制发生在 API 业务逻辑层**：
+     当请求带有具体合法的 API 端点（例如获取模型列表或生成对话）时，Google 业务网关才会校验请求发起者的出口 IP 物理地域归属。一旦判定 IP 来自未获支持的地区（如香港云机房），便会立即拦截并返回如下标准风控错误：
+     ```json
+     {
+       "error": {
+         "code": 403,
+         "message": "User location is not supported for the API use.",
+         "status": "FAILED_PRECONDITION"
+       }
+     }
+     ```
 
-- **解决建议**：
-  1. **方案 1（推荐：选用合规原生机房）**：
-     将代理部署在位于 Google Gemini / OpenAI 官方支持地区（如美国、日本、新加坡、韩国、德国、英国等主流合规云数据中心）的 VPS 节点上。
-  2. **方案 2（VPS 配置 Cloudflare WARP 出站解锁）**：
-     若当前 VPS 无法更换，可在此 VPS 上配置 Cloudflare WARP 将对外发起的出站流量路由至合规地区，从而解锁 Google 地区限制。
+- **精准排查与验证三步法**：
+  1. **检查当前 VPS 的公网 IP 物理归属**：
+     ```bash
+     curl -s https://ipinfo.io/json
+     ```
+     查看 `country`（国家）和 `org`（机房服务商）。若显示为 `HK`（香港）或部分国内云厂商的海外机房广播段，Google 往往严格限制。
+  2. **在 VPS 终端发起一次真实的 API 业务请求验证**：
+     将你的 API 密钥代入以下命令在 VPS 终端直接执行：
+     ```bash
+     curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=你的GEMINI_API_KEY"
+     ```
+     - 若返回 `User location is not supported`：实锤该 VPS 出口 IP 触发了 Google 地区合规封锁；
+     - 若返回包含各模型 ID 的 JSON 列表：说明该 IP 地区完全合规可用。
+
+- **彻底解决建议**：
+  1. **方案 1（首选推荐：选用原生支持地区的 VPS）**：
+     将代理部署在 Google 官方明确支持的国家/地区（如：美国、日本、新加坡、韩国、德国、英国等主流合规云数据中心）；
+  2. **方案 2（在现有 VPS 上配置 Cloudflare WARP 出站解锁）**：
+     若当前 VPS 无法更换，可在这台 VPS 上安装并配置 Cloudflare WARP 免费分流出站流量，将请求 Google / OpenAI 的出站流量经由合规节点转出，即可完美解除该地区限制。
 
 ---
 
