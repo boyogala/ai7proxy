@@ -268,21 +268,55 @@ Google 生成式接口的正式路径在 `/v1beta` 下，例如 `/v1beta/models/
 
 ## 📦 部署与运行
 
-### 1. Linux (Debian / Ubuntu) 一键极简部署（推荐）
+### 1. Linux (Debian / Ubuntu) 一键极简部署（生产环境强烈推荐）
 
-直接在项目根目录赋予权限并执行：
+以下为**从本地电脑上传源码包到 VPS，规范解压到 `/opt/ai7proxy` 并一键常驻启动**的全流程无跳步指南：
+
+#### 第一步：在本地电脑将 `ai7proxy.zip` 上传到 VPS
+Windows（PowerShell）或 macOS / Linux 终端均内置原生 `scp` 命令，无需额外安装软件。打开本地终端执行：
+
 ```bash
+# 将 <你的VPS_IP> 替换为 VPS 的真实公网 IP 地址
+scp ai7proxy.zip root@<你的VPS_IP>:/root/
+```
+> 💡 *若 VPS 的 SSH 端口非默认 22（如 2222），需加入大写 `-P` 参数：`scp -P 2222 ai7proxy.zip root@<你的VPS_IP>:/root/`*
+
+#### 第二步：登录 VPS 并规范解压至 `/opt/ai7proxy`
+1. SSH 登录您的 VPS：
+   ```bash
+   ssh root@<你的VPS_IP>
+   ```
+2. 安装解压工具并创建目标安装目录：
+   ```bash
+   apt-get update -y && apt-get install -y unzip
+   mkdir -p /opt/ai7proxy
+   ```
+3. 将压缩包静默覆盖解压到 `/opt/ai7proxy`：
+   ```bash
+   unzip -o /root/ai7proxy.zip -d /opt/ai7proxy
+   ```
+
+#### 第三步：进入目录并执行一键安装部署
+```bash
+cd /opt/ai7proxy
 chmod +x proxy2ai
 ./proxy2ai
 ```
-- **自动完成**：Node.js 22 LTS 检测安装、npm 依赖安装、项目编译、注册为 `systemd` 后台系统服务并开机自启。
-- **全局命令**：安装后在系统任意目录下可直接输入：
-  - `proxy2ai`：一键安装/启动
-  - `proxy2ai stop`：彻底关闭服务（修改代码前执行）
-  - `proxy2ai restart`：一键重新编译并重启（修改代码后执行）
-  - `proxy2ai status`：查看运行状态
-  - `proxy2ai log`：查看实时日志
-  - `proxy2ai uninstall`：彻底卸载服务并清除全部项目文件，不留任何痕迹
+
+- **全自动化接管**：脚本会自动检测并安装 Node.js 22 LTS、自动安装 npm 依赖、自动编译 TypeScript，并将服务注册为 `systemd` 后台系统服务与开机自启。
+- **全局管理指令**：安装后在系统任意目录下可直接输入：
+  - `proxy2ai`：查看运行状态或一键安装
+  - `proxy2ai status`：查看 systemd 后台常驻状态
+  - `proxy2ai log`：查看实时转发日志
+  - `proxy2ai stop`：关闭后台服务
+  - `proxy2ai restart`：一键重新编译并热重启
+  - `proxy2ai uninstall`：彻底卸载服务并清除全部项目文件，不留任何系统痕迹
+
+#### 附：后续日常代码热更新（仅需 3 步）
+若日后在本地修改了代理代码并重新打包：
+1. 本地上传：`scp ai7proxy.zip root@<VPS_IP>:/root/`
+2. VPS 解压：`unzip -o /root/ai7proxy.zip -d /opt/ai7proxy`
+3. VPS 重启：`proxy2ai restart`（仅需 2 秒即可完成自动重新编译与热加载）
 
 ---
 
