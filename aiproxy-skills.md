@@ -16,7 +16,7 @@ description: 基于开源 ai-proxy 深度重构与构建生产级、高性能、
 3. [网络特征清洗与学术伪装防风控工程](#3-网络特征清洗与学术伪装防风控工程)
 4. [OpenCode v2 客户端深度集成标准与配置真相](#4-opencode-v2-客户端深度集成标准与配置真相)
 5. [Linux (systemd) 一键自动化运维脚本规范 (proxy2ai)](#5-linux-systemd-一键自动化运维脚本规范-proxy2ai)
-6. [零跳步打包、传输与生产部署流水线](#6-零跳步打包传输与生产部署流水线)
+6. [零跳步打包、GitHub 同步、Releases 发版与生产部署流水线](#6-零跳步打包github-同步releases-发版与生产部署流水线)
 7. [Git 历史深度脱敏与安全开源标准](#7-git-历史深度脱敏与安全开源标准)
 8. [生产实战 FAQ 与网络排查深度案例](#8-生产实战-faq-与网络排查深度案例)
 
@@ -44,31 +44,44 @@ description: 基于开源 ai-proxy 深度重构与构建生产级、高性能、
   - 非代理路径立即返回 `null`，放行至静态路由与中间件。
 
 ### 2.2 Undici Keep-Alive 高性能连接池复用
-每次请求新建连接会产生严重的 TLS 握手开销（多轮 RTT，约 150ms ~ 300ms）。
-- **最佳实践**：引入 Node.js 官方底层的 `undici.Agent`：
+每次请求新建连接会产生严重的 TLS 握手开销（多轮 RTT，约 150ms ~ 300ms），且 Undici 默认的 `headersTimeout` / `bodyTimeout` 仅为 300 秒（5分钟），会在长思考模型 15 分钟超时前提前断开连接。
+- **最佳实践**：引入 Node.js 官方底层的 `undici.Agent`，并显式对齐长推理超时：
   ```ts
   import { Agent } from "undici";
 
   export const proxyAgent = new Agent({
-    keepAliveTimeout: 60_000,        // 60秒空闲保活
-    keepAliveMaxTimeout: 600_000,    // 最长连接生命周期 10分钟
-    pipelining: 1,                   // 严格保障请求时序
-    connect: { timeout: 30_000 },    // TCP 建连超时 30秒
+    keepAliveTimeout: 60_000,            // 60秒空闲保活
+    keepAliveMaxTimeout: 600_000,        // 最长连接生命周期 10分钟
+    headersTimeout: DEFAULT_TIMEOUT_MS,  // 900,000ms (15分钟) 首包响应头超时，防止深度思考阶段被底层提前掐断
+    bodyTimeout: DEFAULT_TIMEOUT_MS,     // 900,000ms (15分钟) 流式响应体间隔超时
+    pipelining: 1,                       // 严格保障请求时序
+    connect: { timeout: 30_000 },        // TCP 建连超时 30秒
   });
   ```
   请求通过 `dispatcher: proxyAgent` 派发，后续同一厂商的并发请求直接复用已建立的 TLS 隧道，握手延迟降至 **~0ms**。
 
-### 2.3 统一 15 分钟（900s）长推理超时机制
+### 2.3 统一 15 分钟（900s）长推理超时机制与 Abort 信号清理
 - 废弃 60s 硬编码限制，将全局基准超时设置为 `900,000ms`（15分钟）；
-- 兼容各大厂商与自定义客户端的动态请求头覆盖：检测客户端传入的 `x-proxy-timeout`（毫秒），支持会话级自定义长超时。
+- 兼容各大厂商与自定义客户端的动态请求头覆盖：检测客户端传入的 `x-proxy-timeout`（毫秒），支持会话级自定义长超时；
+- **流式完成后的信号解绑**：一旦上游返回响应头并进入 Web Streams 流式透传阶段，立即执行 `req.signal.removeEventListener("abort", onClientAbort)`，防止客户端在收到 `[DONE]` 正常关闭连接时触发 `controller.abort()` 导致日志刷出 `DOMException [AbortError]` 噪音。
 
-### 2.4 RFC 规范与流式传输（SSE 直通）
-- **请求体清洗**：
+### 2.4 RFC 规范、无 Body 状态码（HTTP 204 / DELETE）与流式传输（SSE 直通）
+- **智能请求体判定 (`hasRequestBody`)**：
   ```ts
-  const isBodyAllowed = req.method !== "GET" && req.method !== "HEAD";
-  const body = isBodyAllowed ? req.body : undefined;
+  function hasRequestBody(req: Request): boolean {
+    if (req.method === "GET" || req.method === "HEAD") return false;
+    if (!req.body) return false;
+    const contentLength = req.headers.get("content-length");
+    const transferEncoding = req.headers.get("transfer-encoding");
+    if (req.method === "DELETE" && (!contentLength || contentLength === "0") && !transferEncoding) {
+      return false;
+    }
+    return true;
+  }
   ```
-  从根源上杜绝 Node.js 运行时由于 GET 携带 Body 抛出的 `TypeError`。
+  从根源上杜绝 Node.js 运行时由于 GET/HEAD 携带 Body 抛出的 `TypeError`，同时完美兼容 OpenCode V2 Budgets API 的无请求体 `DELETE` 请求。
+- **无响应体状态码规范支持 (`isNullBodyStatus`)**：
+  针对 HTTP `101`、`204 No Content`（如 OpenCode Budgets API 的 `PUT`/`DELETE /api/v1/budgets/members/:user_id`）、`205`、`304` 响应，返回 `new Response(null, { status, headers })`，避免 `new Response(upstreamResponse.body, { status: 204 })` 在符合 Fetch 规范的运行时中抛出异常。
 - **打字机直通与防缓冲**：
   响应头显式强制注入：`resHeaders.set("X-Accel-Buffering", "no")`，彻底禁止 Nginx / Cloudflare 在中间层对 SSE（Server-Sent Events）进行流式积攒，保证前端实时打字机效果。
 
@@ -95,9 +108,13 @@ description: 基于开源 ai-proxy 深度重构与构建生产级、高性能、
 
 ## 4. OpenCode v2 客户端深度集成标准与配置真相
 
-### 4.1 统一端点路由设计
-OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点。
-- **设计标准**：放弃碎片化别名，维护唯一定义：
+### 4.1 单一统一根路由架构与 Zen / Go 双通道共享连接池机制
+OpenCode 官方提供两种核心的模型使用与计费方式：
+1. **OpenCode Zen 通道（内置服务商 ID：`"opencode"`）**：充值 Credits 按量扣费模型 + 官方免费模型，官方网关路径为 `https://opencode.ai/inference/v1`（向下兼容 `/zen/v1`）；
+2. **OpenCode Go 通道（内置服务商 ID：`"opencode-go"`）**：Go / Go Plus 包月会员订阅模型（额度内不额外扣费），官方网关路径为 `https://opencode.ai/inference/go/v1`（向下兼容 `/zen/go/v1`）。
+
+- **为什么 `ai7proxy` 采用“唯一一条统一根规则”而非拆成多条子路由？**
+  在 `src/config.ts` 中，`ai7proxy` 对整个 OpenCode 生态只维护唯一一条根映射定义：
   ```ts
   {
     pathSegment: "opencode",
@@ -105,19 +122,23 @@ OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点
     timeout: DEFAULT_TIMEOUT_MS,
   }
   ```
-  自动透明支持：
-  - 官方根网关：`https://your-domain.com/opencode/...` -> `https://opencode.ai/...`
-  - Console Inference 统一网关（按量付费与免费模型）：`https://your-domain.com/opencode/inference/v1` -> `https://opencode.ai/inference/v1`
-  - Console Inference 协议族网关：
-    - OpenAI Chat / Responses：`https://your-domain.com/opencode/inference/openai/v1/...` -> `https://opencode.ai/inference/openai/v1/...`
-    - Anthropic Messages：`https://your-domain.com/opencode/inference/anthropic/v1/messages` -> `https://opencode.ai/inference/anthropic/v1/messages`
-    - Google Gemini：`https://your-domain.com/opencode/inference/google/v1beta/models/<model>:generateContent` -> `https://opencode.ai/inference/google/v1beta/models/<model>:generateContent`
-    - SystemOne (Jev 决策模型)：`https://your-domain.com/opencode/inference/v1/systemone` -> `https://opencode.ai/inference/v1/systemone`
-  - 精选编码模型 (OpenCode Go)：`https://your-domain.com/opencode/inference/go/v1` -> `https://opencode.ai/inference/go/v1`（并向下兼容 `/opencode/zen/go/v1`）
-  - 工作区连接服务商 (Providers API)：`https://your-domain.com/opencode/inference/custom/<connection_id>/...` -> `https://opencode.ai/inference/custom/<connection_id>/...`
-  - 控制台配置与预算管理 (Console & Budgets API)：`https://your-domain.com/opencode/console/api/v2/config`、`https://your-domain.com/opencode/console/api/v1/budgets/members`
+  - **实现机制**：当请求 `/opencode/...` 到达时，`ProxyRouter.find()` 以 **$O(1)$ 复杂度**匹配首段目录 `"opencode"`，`buildTargetUrl()` 精确剥离 `/opencode` 前缀并将剩余全部子路径原封不动拼接到 `https://opencode.ai` 后。
+  - **共享连接池的低延迟优势**：由于 Zen (`/inference/v1`)、Go (`/inference/go/v1`)、SystemOne (`/inference/v1/systemone`)、Custom Providers (`/inference/custom/<connection_id>`) 以及 Console/Budgets API (`/console/...`) 在上游共享同一个 Origin (`https://opencode.ai:443`)，`undici.Agent` 在底层会让 Zen 和 Go **直接复用同一条已建立的 TCP + TLS 1.3 加密长连接隧道**，跨通道切换模型的握手延迟为 **~0ms**！
+  - **单条规则自动透明覆盖的全部官方路径**：
+    - 官方根网关：`https://your-domain.com/opencode/...` -> `https://opencode.ai/...`
+    - **Zen 通道（Console Inference 按量付费与免费模型统一网关）**：`https://your-domain.com/opencode/inference/v1` -> `https://opencode.ai/inference/v1`（兼容 `/opencode/zen/v1`）
+    - **Go 通道（OpenCode Go 订阅精选编码模型网关）**：`https://your-domain.com/opencode/inference/go/v1` -> `https://opencode.ai/inference/go/v1`（兼容 `/opencode/zen/go/v1`）
+    - Console Inference 协议族网关：
+      - OpenAI Chat / Responses：`https://your-domain.com/opencode/inference/openai/v1/...` -> `https://opencode.ai/inference/openai/v1/...`
+      - Anthropic Messages：`https://your-domain.com/opencode/inference/anthropic/v1/messages` -> `https://opencode.ai/inference/anthropic/v1/messages`
+      - Google Gemini：`https://your-domain.com/opencode/inference/google/v1beta/models/<model>:generateContent` -> `https://opencode.ai/inference/google/v1beta/models/<model>:generateContent`
+      - SystemOne (Jev 决策模型)：`https://your-domain.com/opencode/inference/v1/systemone` -> `https://opencode.ai/inference/v1/systemone`
+    - 工作区连接服务商 (Providers API)：`https://your-domain.com/opencode/inference/custom/<connection_id>/...` -> `https://opencode.ai/inference/custom/<connection_id>/...`
+    - 控制台配置与预算管理 (Console & Budgets API)：`https://your-domain.com/opencode/console/api/v2/config`、`https://your-domain.com/opencode/console/api/v1/budgets/members`
 
-### 4.2 客户端标准配置模板 (`opencode.jsonc`)
+### 4.2 客户端标准配置模板 (`opencode.jsonc`) 与 Zen / Go 自动分流
+虽然 `ai7proxy` 服务端只需一条 `/opencode` 规则，但 OpenCode 客户端通过不同的内置服务商 ID（`"opencode"` 与 `"opencode-go"`）及对应的 URL 子路径来区分扣费账户（因为 `kimi-k3`、`glm-5.3`、`deepseek-v4-pro` 等模型同时存在于 Zen 和 Go 中）。在 `opencode.jsonc` 中同时配置两者后，选择 `opencode/<模型>` 或 `opencode-go/<模型>` 即可自动走对应代理通道：
+
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
@@ -152,12 +173,14 @@ OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点
         "apiKey": "{env:OPENROUTER_API_KEY}"
       }
     },
+    // OpenCode Zen 通道：充值 Credits 按量扣费模型 + 免费模型（使用 opencode/<模型> 时自动走此通道）
     "opencode": {
       "settings": {
         "baseURL": "https://your-domain.com/opencode/inference/v1",
         "apiKey": "{env:OPENCODE_API_KEY}"
       }
     },
+    // OpenCode Go 通道：Go / Go Plus 包月订阅会员模型（使用 opencode-go/<模型> 时自动走此通道）
     "opencode-go": {
       "settings": {
         "baseURL": "https://your-domain.com/opencode/inference/go/v1",
@@ -168,15 +191,18 @@ OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点
 }
 ```
 
-### 4.3 核心机制真相：“给出具体模型” vs “不给出具体模型”
+### 4.3 核心机制真相：“给出具体模型” vs “不给出具体模型”与“严禁顶层声明 `package`”
 很多开发者对该配置存在严重误解，智能体应向使用者清晰阐明底层逻辑：
 
 | 配置策略 | 声明方式 | 行为逻辑与可用范围 | 适用场景 |
 | :--- | :--- | :--- | :--- |
 | **不给具体模型** *(强烈推荐)* | 只配置 `baseURL` + `apiKey`，**不写 `models: {}`** | **该服务商官方开放的所有可用模型全部直接可用！** 客户端会自动继承 OpenCode 内置官方目录（`models.dev`）。敲 `/models` 官方最新全量模型全选可用。 | **日常开发最佳实践**。零维护成本，官方发布新模型无需修改配置即可直接使用。 |
-| **显式给出具体模型** | 显式声明 `models: { "model-id": { ... } }` | **增量覆盖/定制模式**。用于自定义尚未收录的模型、指定专属 Token 上限、或设置 `"disabled": true` 隐藏特定高消费模型。 | 接入内测模型、团队权限成本管控、或为特定模型锁定 `#high` 思考档位。 |
+| **显式给出具体模型** | 显式声明 `models: { "model-id": { ... } }` | **增量覆盖/定制模式**。用于自定义尚未收录的模型、指定专属 Token 上限、或设置 `"disabled": true` 隐藏特定高消费模型。 | 接入内测模型、团队权限成本管控、或为特定模型锁定 `#low` / `#high` 思考档位。 |
 
-> ⚠️ **重要认知**：`ai7proxy` 仅为高性能透明管道，**绝不会限制或裁剪任何模型名称**。推理思考（Thinking）、图片/PDF 多模态及工具调用（Tools）全部在客户端与官方之间天然透传，日常无需手动重写 `capabilities`。
+> ⚠️ **核心避坑法则 1（严禁在 `"opencode"` / `"opencode-go"` 顶层声明 `"package"`）**：
+> `"opencode"` 与 `"opencode-go"` 属于跨协议族的内置服务商（内部同时包含走 `/responses` 的 GPT/Grok/Muse、走 `/messages` 的 Claude/MiniMax/Qwen、走 `/models/...:generateContent` 的 Gemini，以及走 `/chat/completions` 的 GLM/Kimi/DeepSeek）。**切勿在 `"opencode"` 或 `"opencode-go"` 块中添加 `"package": "@opencode/ai/providers/openai-compatible"`**，否则 OpenCode v2 会清空模型自带的专属协议适配器，导致非 `/chat/completions` 协议的模型全部报错！
+>
+> ⚠️ **核心避坑法则 2**：`ai7proxy` 仅为高性能透明管道，**绝不会限制或裁剪任何模型名称**。推理思考（Thinking）、图片/PDF 多模态及工具调用（Tools）全部在客户端与官方之间天然透传，日常无需手动重写 `capabilities`。
 
 ---
 
@@ -193,8 +219,16 @@ OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点
    无论脚本放在 `/opt/ai7proxy` 还是任意临时路径，自动精准识别真实所在目录，动态写入 systemd 的 `WorkingDirectory`。
 2. **全自动环境自愈**：
    自动检测系统的 Node.js 版本，若缺失或低于 v20，自动通过 NodeSource 源无人值守安装 Node.js 22 LTS 与构建工具链。
-3. **全局快捷方式软链接**：
-   自动将脚本软链接至 `/usr/local/bin/proxy2ai`，赋予全局调用能力。
+3. **防权限丢失的自愈式全局指令包装脚本 (`/usr/local/bin/proxy2ai`)**：
+   在 Windows 上打包 `.zip` 并在 Linux VPS 上通过 `unzip -o` 覆盖解压时，`/opt/ai7proxy/proxy2ai` 经常会丢失 `+x` 可执行权限（若使用传统 `ln -sf` 软链接会导致执行 `proxy2ai restart` 报 `Permission denied`）。因此 `/usr/local/bin/proxy2ai` 采用自愈包装脚本：
+   ```bash
+   cat > /usr/local/bin/proxy2ai <<EOF
+   #!/usr/bin/env bash
+   chmod +x "${PROJECT_DIR}/proxy2ai" "${PROJECT_DIR}/proxy2ai.sh" 2>/dev/null || true
+   exec "${PROJECT_DIR}/proxy2ai" "\$@"
+   EOF
+   chmod +x /usr/local/bin/proxy2ai
+   ```
 
 ### 5.2 标准运维命令集
 ```bash
@@ -208,44 +242,70 @@ proxy2ai uninstall# 彻底移除服务文件并清理整个项目，零残留卸
 
 ---
 
-## 6. 零跳步打包、传输与生产部署流水线
+## 6. 零跳步打包、GitHub 同步、Releases 发版与生产部署流水线
 
 ### 第一步：本地安全打包（严格排除垃圾文件）
-在源码目录执行打包，必须排除 `node_modules/` 与编译产物：
+在项目根目录执行打包，必须排除 `node_modules/`、`dist/` 与 `.git/`，且保持文件在压缩包根层级（便于 `unzip -o ... -d /opt/ai7proxy` 直接覆盖）：
+
 ```bash
-# Windows PowerShell
-Compress-Archive -Path src, test, package.json, package-lock.json, tsconfig.json, proxy2ai, proxy2ai.sh, Dockerfile, README.md, .gitignore -DestinationPath ai7proxy.zip -Force
+# Linux / macOS 终端打包（以按日期命名 ai7proxy20261015.zip 为例）
+cd /media/askuyue/HPwd/boyogalaGITHUB/ai7proxy
+rm -f ai7proxy20261015.zip && zip -r ai7proxy20261015.zip \
+  src \
+  test \
+  aiproxy-skills.md \
+  Dockerfile \
+  package.json \
+  package-lock.json \
+  proxy2ai \
+  proxy2ai.sh \
+  README.md \
+  tsconfig.json \
+  .gitignore
+
+# 校验压缩包内容列表
+unzip -l ai7proxy20261015.zip
 ```
 
-### 第二步：本地终端一键上传至 VPS
-无需任何第三方 GUI 工具，直接使用系统内置原生 `scp` 命令：
-```bash
-scp ai7proxy.zip root@<你的VPS_IP>:/root/
-# 若 SSH 端口非默认 22，添加大写 -P 参数：
-# scp -P 2222 ai7proxy.zip root@<你的VPS_IP>:/root/
+```powershell
+# Windows PowerShell 打包
+Compress-Archive -Path src, test, aiproxy-skills.md, Dockerfile, package.json, package-lock.json, proxy2ai, proxy2ai.sh, README.md, tsconfig.json, .gitignore -DestinationPath ai7proxy20261015.zip -Force
 ```
 
-### 第三步：登录 VPS 规范解压至 `/opt/ai7proxy`
+### 第二步：将最新源码推送至 GitHub 仓库并发布 Releases 附件
+1. **推送源码到 GitHub (`https://github.com/boyogala/ai7proxy.git`)**：
+   ```bash
+   npm run build && npm test
+   git status
+   git add .
+   git commit -m "feat: 全面适配 OpenCode V2 多协议网关、Go 订阅路由与 HTTP 204/超时稳定性增强"
+   git push -u origin main
+   ```
+2. **上传 `ai7proxy20261015.zip` 到 GitHub Releases**：
+   - **网页端方式**：访问 `https://github.com/boyogala/ai7proxy/releases/new` -> 在 `Choose a tag` 创建新标签（如 `v2026.10.15`） -> 填写标题与说明 -> 将 `ai7proxy20261015.zip` 拖入底部 `Attach binaries` 区域 -> 点击 **Publish release**。
+   - **GitHub CLI (`gh`) 终端一键方式**：
+     ```bash
+     gh release create v2026.10.15 ./ai7proxy20261015.zip \
+       --title "ai7proxy v2026.10.15" \
+       --notes "全面适配 OpenCode V2 多协议网关、Go 订阅路由与 HTTP 204/超时稳定性增强"
+     ```
+
+### 第三步：本地终端一键上传至 VPS 并规范部署至 `/opt/ai7proxy`
 ```bash
-# 1. 登录 VPS
+# 1. 本地上传压缩包至 VPS
+scp ai7proxy20261015.zip root@<你的VPS_IP>:/root/
+
+# 2. 登录 VPS 解压并启动
 ssh root@<你的VPS_IP>
-
-# 2. 安装解压依赖并创建标准目录
 apt-get update -y && apt-get install -y unzip
 mkdir -p /opt/ai7proxy
-
-# 3. 静默覆盖解压
-unzip -o /root/ai7proxy.zip -d /opt/ai7proxy
-
-# 4. 进入目录赋权并一键启动
-cd /opt/ai7proxy
-chmod +x proxy2ai
-./proxy2ai
+unzip -o /root/ai7proxy20261015.zip -d /opt/ai7proxy
+cd /opt/ai7proxy && chmod +x proxy2ai && ./proxy2ai
 ```
 
 ### 第四步：后续代码热更新流程（极简 3 步）
-1. 本地打包上传：`scp ai7proxy.zip root@<VPS_IP>:/root/`
-2. VPS 静默覆盖解压：`unzip -o /root/ai7proxy.zip -d /opt/ai7proxy`
+1. 本地打包上传：`scp ai7proxy20261015.zip root@<VPS_IP>:/root/`
+2. VPS 静默覆盖解压：`unzip -o /root/ai7proxy20261015.zip -d /opt/ai7proxy`
 3. VPS 极速热重启：`proxy2ai restart`
 
 ---
@@ -258,7 +318,7 @@ chmod +x proxy2ai
 在提交前必须对全项目目录执行正则深度检索：
 - **域名敏感扫描**：确保无任何包含个人测试域名（如 `ai7proxy.894900.xyz`）的遗留，全部替换为标准范例域名（`https://your-domain.com`）；
 - **公网 IP 扫描**：确保无任何真实物理云机房公网 IP，仅允许出现 `127.0.0.1` 及测试 Mock 假 IP；
-- **API Key 扫描**：确保无任何 `sk-` 等真实密钥，必须使用 `{env:VARIABLE_NAME}` 占位。
+- **API Key 与密码扫描**：确保无任何 `sk-` 真实密钥或服务器密码，配置示例统一使用 `{env:VARIABLE_NAME}` 占位。
 
 ### 7.2 彻底抹除 Git Commit 历史（重写历史防翻阅）
 若早期提交曾不慎包含敏感域名，即使后续提交新 Commit 修正，他人也能通过翻阅历史 Commit Diff 查看到敏感信息。
@@ -279,7 +339,7 @@ chmod +x proxy2ai
 
 ## 8. 生产实战 FAQ 与网络排查深度案例
 
-### 实战案例：调用 Google Gemini 提示 `User location is not supported`，但探测连通性却返回 `HTTP/2 404`？
+### 实战案例一：调用 Google Gemini 提示 `User location is not supported`，但探测连通性却返回 `HTTP/2 404`？
 
 #### 现象再现：
 在 VPS 终端执行探测：
@@ -315,3 +375,65 @@ server: scaffolding on HTTPServer2
 3. **根治方案**：
    - **方案 A（最佳）**：部署在 Google 官方原生支持的国家/地区 VPS（美国、日本、新加坡、欧洲等合规节点）；
    - **方案 B（出口解锁）**：在现有 VPS 上安装 Cloudflare WARP 免费配置出站分流，将对外流量由原生合规节点转出。
+
+---
+
+### 实战案例二：在 OpenCode 中调用免费测试模型（如 `cat-jam-free`）返回 `502 inference_failed` 时，如何判断是代理服务故障还是官方上游算力超时？
+
+#### 现象再现：
+在 `opencode.jsonc` 中配置好 `"opencode"` (`/opencode/inference/v1`) 和 `"opencode-go"` (`/opencode/inference/go/v1`) 后，使用 `cat-jam-free` 模型时收到如下错误日志：
+```json
+{
+  "event": {
+    "outcome": "failed",
+    "category": "inference",
+    "protocol": "openai-chat",
+    "product": "standard",
+    "path": "/inference/v1/chat/completions",
+    "requestedModel": "cat-jam-free",
+    "statusCode": 502,
+    "errorCode": "inference_failed",
+    "errorMessage": "The inference request failed.",
+    "reasoningMode": "effort",
+    "reasoningEffort": "max",
+    "country": "US",
+    "region": "California",
+    "city": "Los Angeles",
+    "attemptCount": 2,
+    "attempts": [
+      { "provider": "opencode", "model": "cat-jam-free", "statusCode": 502, "durationMs": 30113, "errorCode": "inference_failed" },
+      { "provider": "opencode", "model": "cat-jam-free", "statusCode": 502, "durationMs": 10149, "errorCode": "inference_failed" }
+    ]
+  }
+}
+```
+
+#### 深度诊断方法（3 秒定性是否与 `ai7proxy` 有关）：
+1. **看错误 JSON 结构归属**：
+   - 若是 `ai7proxy` 自身连不上 `opencode.ai` 抛出的 502，格式固定为 `{"error":{"message":"Bad Gateway: Unable to connect to upstream provider.","type":"proxy_error","code":502}}`。
+   - 而上述包含 `"workspaceID"`、`"serviceAccountID"`、`"product": "standard" | "go"`、`"attempts"` 的 JSON 是 **OpenCode 官方网关 (`opencode.ai`) 返回的推理遥测事件日志**。
+   - 日志中 `"country": "US", "region": "California", "city": "Los Angeles"` 以及完整的 `requestHeaders` 直接证明：**`ai7proxy` 已 100% 成功剥离客户端真实 IP，并将请求与认证标头完整无损地送达了 `opencode.ai`！**
+2. **看 `attempts` 中的 `30113ms`（30.1 秒）耗时特征**：
+   - 不管走 Zen (`/inference/v1`) 还是 Go (`/inference/go/v1`)，`cat-jam-free` 在 `opencode.ai` 内部都指向同一个免费匿名测试算力池（Stealth Model）。
+   - 当客户端携带约 26KB 的 Agent 工具上下文并开启 `"reasoningEffort": "max"` 或 `"high"` 时，免费算力节点因排队过载无法在 **OpenCode 官方网关内部硬编码的 30 秒首包限时（`30113ms` / `30102ms`）** 内吐出首包，被 `opencode.ai` 内部超时斩断并重试失败，最终向客户端返回 `502 inference_failed`。
+
+#### 解决方案：
+- **无需修改 `ai7proxy` 代码或代理配置**；
+- **方案 A**：将该免费测试模型的思考强度从 `max`/`high` 调低至 `low` 或 `medium`（避免触发 `opencode.ai` 内部对免费节点的 30 秒首包斩断）；
+- **方案 B（推荐）**：直接切换至上游算力充沛稳定的模型（如免费模型中的 `opencode/nemotron-3-ultra-free`、`opencode/muse-spark-1.3-contributor-free`，或 `opencode-go/` 订阅通道下的 `kimi-k3`、`glm-5.3`、`deepseek-v4-pro`、`minimax-m3` 等正式商业模型）。
+
+---
+
+### 实战案例三：测试 OpenCode 免费模型时，为何 `curl` 裸请求返回 `403 FreeTierError`，而通过 OpenCode CLI 却能正常免费调用？
+
+#### 核心机制解析：
+OpenCode V2 对不同类型的免费模型实施了分级的防滥用校验策略：
+1. **SystemOne 决策模型 (`jev-1.13-free`)**：
+   - 位于专用端点 `POST /opencode/inference/v1/systemone`，无需 Authorization 即可直接通过 `curl` 调用并返回 `200 OK` 决策 JSON。
+2. **对话/Agent 免费模型 (`cat-jam-free`、`muse-spark-1.3-contributor-free`、`nemotron-3-ultra-free`)**：
+   - 若不带付费 API Key 直接用 `curl` 裸调 `/opencode/inference/v1/chat/completions` 或 `/responses`，`opencode.ai` 会拦截并返回 `403 FreeTierError: Free tier requires OpenCode CLI. Authenticate with a paid API key for direct API access.`。
+   - **正确免 Key 端到端测试方法**：在合规出口服务器或通过 `ai7proxy` 代理注入 `OPENCODE_CONFIG_CONTENT`，使用官方 CLI 发起非交互式调用：
+     ```bash
+     OPENCODE_CONFIG_CONTENT='{"providers":{"opencode":{"settings":{"baseURL":"http://127.0.0.1:7749/opencode/inference/v1"}}}}' \
+       opencode run --standalone --model opencode/nemotron-3-ultra-free "Reply with ONLY: PONG" < /dev/null
+     ```
