@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import app from "../src/main.js";
 import { PROXIES, proxyRouter, ProxyRouter } from "../src/config.js";
-import { buildForwardHeaders, buildTargetUrl } from "../src/proxy.js";
+import { buildForwardHeaders, buildTargetUrl, hasRequestBody, isNullBodyStatus } from "../src/proxy.js";
 
 describe("ai7proxy Comprehensive Test Suite", () => {
   let mockServer: http.Server;
@@ -39,6 +39,12 @@ describe("ai7proxy Comprehensive Test Suite", () => {
           res.write("data: chunk 1\n\n");
           res.write("data: chunk 2\n\n");
           res.end("data: [DONE]\n\n");
+          return;
+        }
+
+        if (req.url?.includes("/console/api/v1/budgets/members/") && (req.method === "PUT" || req.method === "DELETE")) {
+          res.writeHead(204);
+          res.end();
           return;
         }
 
@@ -88,43 +94,69 @@ describe("ai7proxy Comprehensive Test Suite", () => {
       assert.equal(matchXAI.proxy.pathSegment, "xai");
     });
 
-    it("应正确支持单一且完整的 OpenCode V2 统一路由映射", () => {
-      // 1. OpenCode Go / Zen 端点透明代理
-      const matchOpenCodeGo = proxyRouter.find("/opencode/zen/go/v1/chat/completions", "localhost");
-      assert.ok(matchOpenCodeGo);
-      assert.equal(matchOpenCodeGo.proxy.pathSegment, "opencode");
-      assert.equal(matchOpenCodeGo.proxy.target, "https://opencode.ai");
+    it("应正确支持单一且完整的 OpenCode V2 全功能统一路由映射（Inference / Go / Custom Providers / Console / Budgets）", () => {
+      const openCodeCases: Array<[string, string, string]> = [
+        // 1. Console API & Device OAuth & Budgets
+        ["/opencode/console/api/v2/config", "", "https://opencode.ai/console/api/v2/config"],
+        ["/opencode/console/auth/device/code", "", "https://opencode.ai/console/auth/device/code"],
+        ["/opencode/console/auth/device/token", "", "https://opencode.ai/console/auth/device/token"],
+        ["/opencode/console/api/v1/budgets/members", "", "https://opencode.ai/console/api/v1/budgets/members"],
+        ["/opencode/console/api/v1/budgets/members/user_123", "", "https://opencode.ai/console/api/v1/budgets/members/user_123"],
+        // 2. Inference API - 多协议族标准路径
+        ["/opencode/inference/openai/v1/chat/completions", "", "https://opencode.ai/inference/openai/v1/chat/completions"],
+        ["/opencode/inference/openai/v1/responses", "", "https://opencode.ai/inference/openai/v1/responses"],
+        ["/opencode/inference/anthropic/v1/messages", "", "https://opencode.ai/inference/anthropic/v1/messages"],
+        [
+          "/opencode/inference/google/v1beta/models/gemini-3.1-pro:generateContent",
+          "",
+          "https://opencode.ai/inference/google/v1beta/models/gemini-3.1-pro:generateContent",
+        ],
+        [
+          "/opencode/inference/google/v1beta/models/gemini-3.1-pro:streamGenerateContent",
+          "?alt=sse",
+          "https://opencode.ai/inference/google/v1beta/models/gemini-3.1-pro:streamGenerateContent?alt=sse",
+        ],
+        // 3. Inference API - /inference/v1 统一网关与 Jev SystemOne 端点
+        ["/opencode/inference/v1/models", "", "https://opencode.ai/inference/v1/models"],
+        ["/opencode/inference/v1/chat/completions", "", "https://opencode.ai/inference/v1/chat/completions"],
+        ["/opencode/inference/v1/responses", "", "https://opencode.ai/inference/v1/responses"],
+        ["/opencode/inference/v1/messages", "", "https://opencode.ai/inference/v1/messages"],
+        [
+          "/opencode/inference/v1/models/gemini-4-argon:generateContent",
+          "",
+          "https://opencode.ai/inference/v1/models/gemini-4-argon:generateContent",
+        ],
+        ["/opencode/inference/v1/systemone", "", "https://opencode.ai/inference/v1/systemone"],
+        // 4. OpenCode Go 最新端点与旧版 Zen 兼容端点
+        ["/opencode/inference/go/v1/models", "", "https://opencode.ai/inference/go/v1/models"],
+        ["/opencode/inference/go/v1/chat/completions", "", "https://opencode.ai/inference/go/v1/chat/completions"],
+        ["/opencode/inference/go/v1/responses", "", "https://opencode.ai/inference/go/v1/responses"],
+        ["/opencode/inference/go/v1/messages", "", "https://opencode.ai/inference/go/v1/messages"],
+        [
+          "/opencode/inference/go/v1/models/gemini-4-argon-contributor:generateContent",
+          "",
+          "https://opencode.ai/inference/go/v1/models/gemini-4-argon-contributor:generateContent",
+        ],
+        ["/opencode/zen/go/v1/chat/completions", "", "https://opencode.ai/zen/go/v1/chat/completions"],
+        // 5. Providers API - 工作区自定义连接网关 (/inference/custom/<connection_id>)
+        ["/opencode/inference/custom/conn_abc123/chat/completions", "", "https://opencode.ai/inference/custom/conn_abc123/chat/completions"],
+        ["/opencode/inference/custom/conn_abc123/responses", "", "https://opencode.ai/inference/custom/conn_abc123/responses"],
+        ["/opencode/inference/custom/conn_abc123/messages", "", "https://opencode.ai/inference/custom/conn_abc123/messages"],
+        [
+          "/opencode/inference/custom/conn_abc123/models/gemini-3.1-pro:generateContent",
+          "",
+          "https://opencode.ai/inference/custom/conn_abc123/models/gemini-3.1-pro:generateContent",
+        ],
+      ];
 
-      // 验证拼接出来的最终目标 URL 准确无误
-      const targetUrlGo = buildTargetUrl(
-        matchOpenCodeGo.proxy,
-        matchOpenCodeGo.matchedPrefix,
-        "/opencode/zen/go/v1/chat/completions",
-        ""
-      );
-      assert.equal(targetUrlGo.toString(), "https://opencode.ai/zen/go/v1/chat/completions");
-
-      // 2. OpenCode 模型与通用端点透明代理
-      const matchModels = proxyRouter.find("/opencode/zen/go/v1/models", "localhost");
-      assert.ok(matchModels);
-      const targetUrlModels = buildTargetUrl(
-        matchModels.proxy,
-        matchModels.matchedPrefix,
-        "/opencode/zen/go/v1/models",
-        ""
-      );
-      assert.equal(targetUrlModels.toString(), "https://opencode.ai/zen/go/v1/models");
-
-      // 3. OpenCode 根端点透明代理
-      const matchGeneric = proxyRouter.find("/opencode/v1/models", "localhost");
-      assert.ok(matchGeneric);
-      const targetUrlGeneric = buildTargetUrl(
-        matchGeneric.proxy,
-        matchGeneric.matchedPrefix,
-        "/opencode/v1/models",
-        ""
-      );
-      assert.equal(targetUrlGeneric.toString(), "https://opencode.ai/v1/models");
+      for (const [pathname, search, expectedUrl] of openCodeCases) {
+        const match = proxyRouter.find(pathname, "localhost");
+        assert.ok(match, `Should match ${pathname}`);
+        assert.equal(match.proxy.pathSegment, "opencode");
+        assert.equal(match.proxy.target, "https://opencode.ai");
+        const targetUrl = buildTargetUrl(match.proxy, match.matchedPrefix, pathname, search);
+        assert.equal(targetUrl.toString(), expectedUrl);
+      }
     });
 
     it("对非代理路径应安全返回 null，不产生任何副作用", () => {
@@ -163,13 +195,21 @@ describe("ai7proxy Comprehensive Test Suite", () => {
       raw.set("x-forwarded-for", "1.2.3.4");
       raw.set("cdn-loop", "cloudflare");
       raw.set("x-real-ip", "1.2.3.4");
-      raw.set("authorization", "Bearer sk-test-key");
+      raw.set("authorization", "Bearer oc_sk_test_key");
+      raw.set("x-api-key", "oc_sk_provider_key");
+      raw.set("api-key", "oc_sk_azure_key");
+      raw.set("x-goog-api-key", "oc_sk_google_key");
+      raw.set("x-org-id", "org_workspace_123");
+      raw.set("x-opencode-org-id", "org_workspace_123");
       raw.set("x-opencode-session", "ses_abc123xyz");
+      raw.set("x-opencode-session-id", "ses_abc123xyz");
+      raw.set("x-opencode-project", "proj_abc123xyz");
+      raw.set("x-opencode-client", "cli");
       raw.set("anthropic-version", "2023-06-01");
       raw.set("anthropic-beta", "output-128k-2025-02-19,thinking-2025-01-31");
-      raw.set("user-agent", "custom-coding-agent/2.0");
+      raw.set("user-agent", "opencode/latest/2.0.29/cli");
 
-      const targetUrl = new URL("https://opencode.ai/zen/go/v1/chat/completions");
+      const targetUrl = new URL("https://opencode.ai/inference/v1/chat/completions");
       const cleaned = buildForwardHeaders(raw, targetUrl);
 
       // 验证 Host 重写
@@ -181,12 +221,20 @@ describe("ai7proxy Comprehensive Test Suite", () => {
       assert.equal(cleaned.has("cdn-loop"), false);
       assert.equal(cleaned.has("x-real-ip"), false);
 
-      // 验证核心业务和 AI 厂商专属头保留
-      assert.equal(cleaned.get("authorization"), "Bearer sk-test-key");
+      // 验证核心业务和 OpenCode V2 / AI 厂商专属头保留
+      assert.equal(cleaned.get("authorization"), "Bearer oc_sk_test_key");
+      assert.equal(cleaned.get("x-api-key"), "oc_sk_provider_key");
+      assert.equal(cleaned.get("api-key"), "oc_sk_azure_key");
+      assert.equal(cleaned.get("x-goog-api-key"), "oc_sk_google_key");
+      assert.equal(cleaned.get("x-org-id"), "org_workspace_123");
+      assert.equal(cleaned.get("x-opencode-org-id"), "org_workspace_123");
       assert.equal(cleaned.get("x-opencode-session"), "ses_abc123xyz");
+      assert.equal(cleaned.get("x-opencode-session-id"), "ses_abc123xyz");
+      assert.equal(cleaned.get("x-opencode-project"), "proj_abc123xyz");
+      assert.equal(cleaned.get("x-opencode-client"), "cli");
       assert.equal(cleaned.get("anthropic-version"), "2023-06-01");
       assert.equal(cleaned.get("anthropic-beta"), "output-128k-2025-02-19,thinking-2025-01-31");
-      assert.equal(cleaned.get("user-agent"), "custom-coding-agent/2.0");
+      assert.equal(cleaned.get("user-agent"), "opencode/latest/2.0.29/cli");
     });
   });
 
@@ -299,6 +347,55 @@ describe("ai7proxy Comprehensive Test Suite", () => {
       assert.equal(json.error.type, "timeout_error");
 
       hangingServer.close();
+    });
+
+    it("OpenCode Budgets API PUT 与无 Body 的 DELETE 请求应正确返回 HTTP 204 No Content", async () => {
+      const match = testRouter.find("/mock-ai/console/api/v1/budgets/members/user_abc", "localhost");
+      assert.ok(match);
+
+      const { forwardProxyRequest } = await import("../src/proxy.js");
+
+      // 1. PUT 设置成员月度预算 -> 204 No Content
+      const putReq = new Request("http://localhost/mock-ai/console/api/v1/budgets/members/user_abc", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer oc_sk_admin",
+        },
+        body: JSON.stringify({ budget_dollars: 75.25 }),
+      });
+
+      const putRes = await forwardProxyRequest({
+        req: putReq,
+        proxy: match.proxy,
+        matchedPrefix: match.matchedPrefix,
+      });
+
+      assert.equal(putRes.status, 204);
+      assert.equal(await putRes.text(), "");
+      assert.equal(lastReceivedRequest.method, "PUT");
+      assert.equal(lastReceivedRequest.body, JSON.stringify({ budget_dollars: 75.25 }));
+
+      // 2. DELETE 移除成员自定义预算（无请求体）-> 204 No Content 且不注入多余请求体
+      const deleteReq = new Request("http://localhost/mock-ai/console/api/v1/budgets/members/user_abc", {
+        method: "DELETE",
+        headers: {
+          authorization: "Bearer oc_sk_admin",
+        },
+      });
+      assert.equal(hasRequestBody(deleteReq), false);
+      assert.equal(isNullBodyStatus(204, "DELETE"), true);
+
+      const deleteRes = await forwardProxyRequest({
+        req: deleteReq,
+        proxy: match.proxy,
+        matchedPrefix: match.matchedPrefix,
+      });
+
+      assert.equal(deleteRes.status, 204);
+      assert.equal(await deleteRes.text(), "");
+      assert.equal(lastReceivedRequest.method, "DELETE");
+      assert.equal(lastReceivedRequest.body, "");
     });
   });
 

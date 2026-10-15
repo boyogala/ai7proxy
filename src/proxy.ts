@@ -1,14 +1,21 @@
 import { Agent } from "undici";
-import type { ProxyTarget } from "./config.js";
+import { DEFAULT_TIMEOUT_MS, type ProxyTarget } from "./config.js";
 
 /**
  * 高性能连接池调度器：
  * 启用长连接保持 (Keep-Alive)，跨请求复用 TLS 连接，
  * 显著消除与境外 AI 服务商建立握手的 150ms~300ms 首包延迟 (TTFT)。
+ * 同时将底层 headersTimeout 与 bodyTimeout 提升至 15 分钟 (900,000ms)，
+ * 避免 undici 默认 300s 超时提前中断深度思考模型或 OpenCode 长推理请求。
  */
 export const proxyAgent = new Agent({
   keepAliveTimeout: 60_000,
   keepAliveMaxTimeout: 600_000,
+  headersTimeout: DEFAULT_TIMEOUT_MS,
+  bodyTimeout: DEFAULT_TIMEOUT_MS,
+  connect: {
+    timeout: 30_000,
+  },
   pipelining: 1,
   connections: 512,
 });
@@ -68,11 +75,54 @@ export function buildForwardHeaders(rawHeaders: Headers, targetUrl: URL): Header
       return;
     }
 
-    // 透传所有合法的 AI 认证与业务标头（如 x-opencode-session, anthropic-version, authorization 等）
+    // 透传所有合法的 AI 认证与业务标头：
+    // - 认证类: authorization, x-api-key, api-key, x-goog-api-key
+    // - OpenCode V2 组织与会话类: x-org-id, x-opencode-org-id, x-opencode-session, x-opencode-session-id,
+    //   x-opencode-parent-session-id, x-session-affinity, x-session-id, x-opencode-project, x-opencode-client, b3, traceparent
+    // - 协议与压缩类: user-agent, anthropic-version, anthropic-beta, content-encoding (zstd/gzip) 等
     headers.set(key, value);
   });
 
   return headers;
+}
+
+/**
+ * 精确判定请求是否携带有效 Body：
+ * 1. GET 与 HEAD 严禁携带 Body；
+ * 2. Content-Length 显式为 "0" 时不传递流式 Body；
+ * 3. DELETE / OPTIONS 若未声明非零 Content-Length 且无 Transfer-Encoding（如 OpenCode Budgets API DELETE），
+ *    不传递空 ReadableStream，防止 undici 注入 Transfer-Encoding: chunked 导致上游网关拒绝。
+ */
+export function hasRequestBody(req: Request): boolean {
+  const method = req.method.toUpperCase();
+  if (method === "GET" || method === "HEAD") {
+    return false;
+  }
+
+  const contentLength = req.headers.get("content-length");
+  if (contentLength === "0") {
+    return false;
+  }
+
+  if (
+    (method === "DELETE" || method === "OPTIONS") &&
+    contentLength === null &&
+    !req.headers.has("transfer-encoding")
+  ) {
+    return false;
+  }
+
+  return Boolean(req.body);
+}
+
+/**
+ * 判定响应状态码是否为 RFC / Fetch 规范定义的无响应体状态（如 204 No Content, 205, 304）
+ */
+export function isNullBodyStatus(status: number, method?: string): boolean {
+  if (method && method.toUpperCase() === "HEAD") {
+    return true;
+  }
+  return status === 204 || status === 205 || status === 304;
 }
 
 /**
@@ -129,17 +179,20 @@ export async function forwardProxyRequest({
     controller.abort();
   }, timeoutMs);
 
-  // 若客户端主动取消请求，直接同步中止上游，防止连接泄漏
+  // 若客户端在等待上游响应头阶段主动取消请求，直接同步中止上游，防止连接泄漏；
+  // 一旦响应头返回并进入流式传输阶段，移除该监听，交由 @hono/node-server 的 writable close 机制平滑调用 reader.cancel()，
+  // 避免 controller.abort() 触发未捕获的 DOMException [AbortError] 污染日志。
+  const onClientAbort = () => {
+    clearTimeout(timeoutId);
+    controller.abort();
+  };
   if (req.signal) {
-    req.signal.addEventListener("abort", () => {
-      clearTimeout(timeoutId);
-      controller.abort();
-    });
+    req.signal.addEventListener("abort", onClientAbort, { once: true });
   }
 
-  // 严格遵循规范：GET 与 HEAD 严禁传递 Body，避免 Node.js 运行时抛出 TypeError
-  const isBodyAllowed = req.method !== "GET" && req.method !== "HEAD";
-  const body = isBodyAllowed ? req.body : undefined;
+  // 严格遵循规范：精确判定是否携带有效请求体，避免 GET/HEAD 抛出 TypeError 或空 DELETE 注入 chunked
+  const sendBody = hasRequestBody(req);
+  const body = sendBody ? req.body : undefined;
 
   try {
     const fetchOptions: any = {
@@ -148,12 +201,15 @@ export async function forwardProxyRequest({
       body,
       signal: controller.signal,
       dispatcher: proxyAgent,
-      duplex: isBodyAllowed && body ? "half" : undefined,
+      duplex: sendBody && body ? "half" : undefined,
     };
 
     const upstreamRes = await fetch(targetUrl.toString(), fetchOptions);
 
     clearTimeout(timeoutId);
+    if (req.signal) {
+      req.signal.removeEventListener("abort", onClientAbort);
+    }
 
     // 构造转发给客户端的响应头
     const clientResHeaders = new Headers();
@@ -167,14 +223,18 @@ export async function forwardProxyRequest({
     // 针对大模型 SSE 流式输出，强制禁用外部网关与反向代理缓冲
     clientResHeaders.set("X-Accel-Buffering", "no");
 
-    // 零拷贝直通数据流
-    return new Response(upstreamRes.body, {
+    // 零拷贝直通数据流（针对 204/205/304 如 OpenCode Budgets API PUT/DELETE 严格返回 null body）
+    const nullBody = isNullBodyStatus(upstreamRes.status, req.method);
+    return new Response(nullBody ? null : upstreamRes.body, {
       status: upstreamRes.status,
       statusText: upstreamRes.statusText,
       headers: clientResHeaders,
     });
   } catch (error: any) {
     clearTimeout(timeoutId);
+    if (req.signal) {
+      req.signal.removeEventListener("abort", onClientAbort);
+    }
 
     if (controller.signal.aborted) {
       return new Response(

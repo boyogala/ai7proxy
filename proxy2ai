@@ -99,12 +99,14 @@ EOF
     echo -e "${GREEN}[✔] 后台服务已成功启动并设置为开机自启！${NC}"
 }
 
-# 4. 创建全局快捷指令 /usr/local/bin/proxy2ai
+# 4. 创建全局快捷指令 /usr/local/bin/proxy2ai（采用自愈包装脚本，防止 Windows zip 覆盖解压丢失 +x 权限）
 setup_global_command() {
-    if [ ! -f /usr/local/bin/proxy2ai ] || [ "$(readlink -f /usr/local/bin/proxy2ai)" != "$SCRIPT_PATH" ]; then
-        ln -sf "$SCRIPT_PATH" /usr/local/bin/proxy2ai
-        chmod +x /usr/local/bin/proxy2ai
-    fi
+    cat <<EOF > /usr/local/bin/proxy2ai
+#!/usr/bin/env bash
+chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
+exec "${SCRIPT_PATH}" "\$@"
+EOF
+    chmod +x /usr/local/bin/proxy2ai
 }
 
 # 部署或启动服务
@@ -161,6 +163,7 @@ restart_service() {
     check_root
     echo -e "${YELLOW}[重新编译] 正在检查文件变更并重新构建...${NC}"
     build_project
+    setup_global_command
     systemctl restart ${SERVICE_NAME}
     echo -e "${GREEN}[✔] ai7proxy 已成功重新编译并重启！${NC}"
 }

@@ -36,7 +36,13 @@ export const PROXIES: ProxyTarget[] = [
     timeout: DEFAULT_TIMEOUT_MS,
   },
 
-  // 4. OpenCode V2 (Official Gateway, Console, and Zen / Go Endpoints)
+  // 4. OpenCode V2 (Official Console API, Multi-Family Inference, Go, Custom Providers & Budgets)
+  // 自动透明支持：
+  // - Console & Budgets API: /opencode/console/api/v2/config, /opencode/console/api/v1/budgets/members
+  // - Inference API (多协议族): /opencode/inference/v1/..., /opencode/inference/openai/v1/..., /opencode/inference/anthropic/v1/..., /opencode/inference/google/v1beta/...
+  // - SystemOne (Jev 决策模型): /opencode/inference/v1/systemone
+  // - OpenCode Go 订阅网关: /opencode/inference/go/v1/... (及向下兼容 /opencode/zen/go/v1/...)
+  // - Connected Providers 网关: /opencode/inference/custom/<connection_id>/...
   {
     pathSegment: "opencode",
     target: "https://opencode.ai",

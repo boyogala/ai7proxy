@@ -24,7 +24,7 @@
 
 | AI 服务商 | 代理请求路径示例 | 映射到的官方真实地址 |
 | :--- | :--- | :--- |
-| **OpenCode v2 (全功能端点)** | `https://your-proxy:7749/opencode/...` | `https://opencode.ai/...` |
+| **OpenCode v2 (Zen 与 Go 统一全功能端点)** | `https://your-proxy:7749/opencode/...` | `https://opencode.ai/...` |
 | **OpenAI** | `https://your-proxy:7749/openai/v1/...` | `https://api.openai.com/v1/...` |
 | **Anthropic** | `https://your-proxy:7749/anthropic/v1/...` | `https://api.anthropic.com/v1/...` |
 | **Google Gemini** | `https://your-proxy:7749/generativelanguage/v1beta/...` | `https://generativelanguage.googleapis.com/v1beta/...` |
@@ -86,17 +86,43 @@
       }
     },
 
-    // 6. OpenCode Go (OpenCode 官方高性价比精选编码模型)
-    "opencode-go": {
-      "package": "@opencode/ai/providers/openai-compatible",
+    // 6. OpenCode Console (官方按量付费与免费模型网关，支持 Chat / Responses / Messages / Gemini 全协议族)
+    // 注意：内置 opencode 与 opencode-go 包含跨协议族模型，切勿在顶层声明 "package"，以免覆盖模型自带协议栈
+    "opencode": {
       "settings": {
-        "baseURL": "https://your-domain.com/opencode/zen/go/v1",
+        "baseURL": "https://your-domain.com/opencode/inference/v1",
+        "apiKey": "{env:OPENCODE_API_KEY}"
+      }
+    },
+
+    // 7. OpenCode Go (OpenCode 官方订阅精选编码模型，最新地址已升级为 /inference/go/v1)
+    "opencode-go": {
+      "settings": {
+        "baseURL": "https://your-domain.com/opencode/inference/go/v1",
         "apiKey": "{env:OPENCODE_API_KEY}"
       }
     }
   }
 }
 ```
+
+#### 💡 OpenCode v2 最新官方文档 `baseURL` 与多协议网关重要说明
+
+根据 OpenCode v2 最新官方文档（[API Overview](https://opencode.ai/v2/docs/console/api/)、[Inference API](https://opencode.ai/v2/docs/console/api/inference/)、[Providers API](https://opencode.ai/v2/docs/console/api/providers/)、[Budgets API](https://opencode.ai/v2/docs/console/api/budgets/)）：
+
+1. **统一网关路径演进（`/inference` 替代旧版 `/zen`）**：
+   - **OpenCode Console（按量付费与免费模型）**：内置服务商 ID 为 `"opencode"`，官方默认 `baseURL` 为 `https://opencode.ai/inference/v1`，代理地址设为 `https://your-domain.com/opencode/inference/v1`（若仅使用免费模型，可省略 `apiKey`）。
+   - **OpenCode Go（包月订阅模型）**：内置服务商 ID 为 `"opencode-go"`，官方默认 `baseURL` 已升级为 `https://opencode.ai/inference/go/v1`，代理地址设为 `https://your-domain.com/opencode/inference/go/v1`（同时兼容旧版 `/opencode/zen/go/v1`）。
+   - **切勿在 `"opencode"` 或 `"opencode-go"` 下覆写 `"package"`**：这两个内置服务商下的模型横跨多种协议栈（如 `cat-jam-free`/`nemotron-3-ultra-free`/`kimi-k2.6` 使用 `@ai-sdk/openai-compatible` 的 `/chat/completions`，`muse-spark-1.3-contributor-free`/`gpt-5.5`/`grok-4.7` 使用 `@ai-sdk/openai` 的 `/responses`，`claude-sonnet-4-6`/`claude-haiku-5-5` 使用 `@ai-sdk/anthropic` 的 `/messages`，`gemini-4-argon` 使用 `@ai-sdk/google` 的 `/models/<model>:generateContent`）。若在服务商顶层写死 `"package": "@opencode/ai/providers/openai-compatible"`，会清空模型自带的专属协议包，导致非 Chat Completions 模型请求失败。
+2. **第三方 SDK / 工具直接调用时的多协议族 `baseURL`**：
+   - OpenAI Chat Completions & Responses：`https://your-domain.com/opencode/inference/openai/v1`（或 `.../opencode/inference/v1`）
+   - Anthropic Messages：`https://your-domain.com/opencode/inference/anthropic/v1/messages`（或 `.../opencode/inference/v1/messages`）
+   - Google Gemini：`https://your-domain.com/opencode/inference/google/v1beta/models/<model>:generateContent`（或 `.../opencode/inference/v1/models/<model>:generateContent`）
+   - TypeSafe AI SystemOne（`jev-1.13` / `jev-1.13-free` 结构化决策模型）：`https://your-domain.com/opencode/inference/v1/systemone`
+3. **工作区连接服务商网关（Providers API）**：
+   - 每个在 Console 连接的服务商拥有独立的网关地址：`https://opencode.ai/inference/custom/<connection_id>`，通过本代理访问即为 `https://your-domain.com/opencode/inference/custom/<connection_id>`，其后直接拼接 `/chat/completions`、`/responses`、`/messages` 或 `/models/<model>:generateContent`，并支持 `Authorization`、`x-api-key`、`api-key`、`x-goog-api-key` 四种认证标头透传。
+4. **控制台配置与预算管理（Console & Budgets API）**：
+   - 基础地址 `CONSOLE_URL` 映射为 `https://your-domain.com/opencode/console`，完整支持 `GET /api/v2/config`、OAuth 设备流 `/auth/device/*` 以及成员预算 `GET / PUT / DELETE /api/v1/budgets/members`（含 `PUT`/`DELETE` 的 `HTTP 204 No Content` 规范响应）。
 
 ---
 

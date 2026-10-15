@@ -106,8 +106,16 @@ OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点
   }
   ```
   自动透明支持：
-  - 官方网关：`https://your-domain.com/opencode/...` -> `https://opencode.ai/...`
-  - 精选编码模型 (Go)：`https://your-domain.com/opencode/zen/go/v1` -> `https://opencode.ai/zen/go/v1`
+  - 官方根网关：`https://your-domain.com/opencode/...` -> `https://opencode.ai/...`
+  - Console Inference 统一网关（按量付费与免费模型）：`https://your-domain.com/opencode/inference/v1` -> `https://opencode.ai/inference/v1`
+  - Console Inference 协议族网关：
+    - OpenAI Chat / Responses：`https://your-domain.com/opencode/inference/openai/v1/...` -> `https://opencode.ai/inference/openai/v1/...`
+    - Anthropic Messages：`https://your-domain.com/opencode/inference/anthropic/v1/messages` -> `https://opencode.ai/inference/anthropic/v1/messages`
+    - Google Gemini：`https://your-domain.com/opencode/inference/google/v1beta/models/<model>:generateContent` -> `https://opencode.ai/inference/google/v1beta/models/<model>:generateContent`
+    - SystemOne (Jev 决策模型)：`https://your-domain.com/opencode/inference/v1/systemone` -> `https://opencode.ai/inference/v1/systemone`
+  - 精选编码模型 (OpenCode Go)：`https://your-domain.com/opencode/inference/go/v1` -> `https://opencode.ai/inference/go/v1`（并向下兼容 `/opencode/zen/go/v1`）
+  - 工作区连接服务商 (Providers API)：`https://your-domain.com/opencode/inference/custom/<connection_id>/...` -> `https://opencode.ai/inference/custom/<connection_id>/...`
+  - 控制台配置与预算管理 (Console & Budgets API)：`https://your-domain.com/opencode/console/api/v2/config`、`https://your-domain.com/opencode/console/api/v1/budgets/members`
 
 ### 4.2 客户端标准配置模板 (`opencode.jsonc`)
 ```jsonc
@@ -142,6 +150,18 @@ OpenCode v2 拥有全套控制台、模型网关以及 Zen/Go 代码补全端点
       "settings": {
         "baseURL": "https://your-domain.com/openrouter",
         "apiKey": "{env:OPENROUTER_API_KEY}"
+      }
+    },
+    "opencode": {
+      "settings": {
+        "baseURL": "https://your-domain.com/opencode/inference/v1",
+        "apiKey": "{env:OPENCODE_API_KEY}"
+      }
+    },
+    "opencode-go": {
+      "settings": {
+        "baseURL": "https://your-domain.com/opencode/inference/go/v1",
+        "apiKey": "{env:OPENCODE_API_KEY}"
       }
     }
   }

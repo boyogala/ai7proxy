@@ -4,7 +4,13 @@ import { logger } from "hono/logger";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { proxyRouter } from "./config.js";
-import { forwardProxyRequest, buildForwardHeaders, proxyAgent } from "./proxy.js";
+import {
+  forwardProxyRequest,
+  buildForwardHeaders,
+  hasRequestBody,
+  isNullBodyStatus,
+  proxyAgent,
+} from "./proxy.js";
 
 const app = new Hono();
 
@@ -46,15 +52,15 @@ app.post(
     const targetUrl = new URL(url);
     const forwardHeaders = buildForwardHeaders(c.req.raw.headers, targetUrl);
 
-    const isBodyAllowed = c.req.method !== "GET" && c.req.method !== "HEAD";
-    const body = isBodyAllowed ? c.req.raw.body : undefined;
+    const sendBody = hasRequestBody(c.req.raw);
+    const body = sendBody ? c.req.raw.body : undefined;
 
     const fetchOptions: any = {
       method: c.req.method,
       headers: forwardHeaders,
       body,
       dispatcher: proxyAgent,
-      duplex: isBodyAllowed && body ? "half" : undefined,
+      duplex: sendBody && body ? "half" : undefined,
     };
 
     const res = await fetch(targetUrl.toString(), fetchOptions);
@@ -62,7 +68,8 @@ app.post(
     const resHeaders = new Headers(res.headers);
     resHeaders.set("X-Accel-Buffering", "no");
 
-    return new Response(res.body, {
+    const nullBody = isNullBodyStatus(res.status, c.req.method);
+    return new Response(nullBody ? null : res.body, {
       headers: resHeaders,
       status: res.status,
     });
