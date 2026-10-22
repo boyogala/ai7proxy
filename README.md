@@ -87,19 +87,45 @@
     },
 
     // 6. OpenCode Console (官方按量付费与免费模型网关，支持 Chat / Responses / Messages / Gemini 全协议族)
-    // 注意：内置 opencode 与 opencode-go 包含跨协议族模型，切勿在顶层声明 "package"，以免覆盖模型自带协议栈
+    // 注意 1：内置 opencode 与 opencode-go 包含跨协议族模型，切勿在顶层声明 "package"，以免覆盖模型自带协议栈
+    // 注意 2：OpenCode v2.1.2+ 官方目录在 opencode / opencode-go 的每个模型内部均写入了模型级 provider.api (model.settings.baseURL)，
+    //         合并配置时模型级 baseURL 优先级高于服务商顶层 baseURL；
+    //         仅需在 models 下配置受地区限制的国外模型走代理，国内模型（Kimi/GLM/DeepSeek/Qwen/MiniMax/MiMo/LongCat等）无需声明，保持直连即可
     "opencode": {
       "settings": {
         "baseURL": "https://your-domain.com/opencode/inference/v1",
         "apiKey": "{env:OPENCODE_API_KEY}"
+      },
+      "models": {
+        "gpt-6-luna": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "gpt-5.6-luna": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "gpt-5-nano": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "muse-wonder-1.0": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "beam-free": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "flint-40b-free": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "nemotron-3.5-super-vl-free": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "nemotron-3.5-lightning-free": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "nemotron-3-ultra-free": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/openai/v1" } },
+        "claude-haiku-5-5": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/anthropic/v1" } },
+        "gemini-3.5-flash-lite": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/google/v1beta" } }
       }
     },
 
-    // 7. OpenCode Go (OpenCode 官方订阅精选编码模型，最新地址已升级为 /inference/go/v1)
+    // 7. OpenCode Go (OpenCode 官方订阅精选编码模型，仅代理国外模型，国内模型保持直连)
     "opencode-go": {
       "settings": {
         "baseURL": "https://your-domain.com/opencode/inference/go/v1",
         "apiKey": "{env:OPENCODE_API_KEY}"
+      },
+      "models": {
+        "gpt-6-luna": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/openai/v1" } },
+        "gpt-5.6-luna": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/openai/v1" } },
+        "grok-4.7": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/openai/v1" } },
+        "beam-free": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/openai/v1" } },
+        "muse-spark-1.3-contributor": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/openai/v1" } },
+        "muse-spark-1.2-contributor": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/openai/v1" } },
+        "claude-haiku-5-5": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/anthropic/v1" } },
+        "gemini-4-argon-contributor": { "settings": { "baseURL": "https://your-domain.com/opencode/inference/go/google/v1beta" } }
       }
     }
   }
@@ -110,10 +136,12 @@
 
 根据 OpenCode v2 最新官方文档（[API Overview](https://opencode.ai/v2/docs/console/api/)、[Inference API](https://opencode.ai/v2/docs/console/api/inference/)、[Providers API](https://opencode.ai/v2/docs/console/api/providers/)、[Budgets API](https://opencode.ai/v2/docs/console/api/budgets/)）：
 
-1. **统一网关路径演进（`/inference` 替代旧版 `/zen`）**：
-   - **OpenCode Console（按量付费与免费模型）**：内置服务商 ID 为 `"opencode"`，官方默认 `baseURL` 为 `https://opencode.ai/inference/v1`，代理地址设为 `https://your-domain.com/opencode/inference/v1`（若仅使用免费模型，可省略 `apiKey`）。
-   - **OpenCode Go（包月订阅模型）**：内置服务商 ID 为 `"opencode-go"`，官方默认 `baseURL` 已升级为 `https://opencode.ai/inference/go/v1`，代理地址设为 `https://your-domain.com/opencode/inference/go/v1`（同时兼容旧版 `/opencode/zen/go/v1`）。
-   - **切勿在 `"opencode"` 或 `"opencode-go"` 下覆写 `"package"`**：这两个内置服务商下的模型横跨多种协议栈（如 `cat-jam-free`/`nemotron-3-ultra-free`/`kimi-k2.6` 使用 `@ai-sdk/openai-compatible` 的 `/chat/completions`，`muse-spark-1.3-contributor-free`/`gpt-5.5`/`grok-4.7` 使用 `@ai-sdk/openai` 的 `/responses`，`claude-sonnet-4-6`/`claude-haiku-5-5` 使用 `@ai-sdk/anthropic` 的 `/messages`，`gemini-4-argon` 使用 `@ai-sdk/google` 的 `/models/<model>:generateContent`）。若在服务商顶层写死 `"package": "@opencode/ai/providers/openai-compatible"`，会清空模型自带的专属协议包，导致非 Chat Completions 模型请求失败。
+1. **统一网关路径演进与 OpenCode v2.1.2+ 模型级 `baseURL` 覆盖机制（极其重要）**：
+   - **OpenCode Console（按量付费与免费模型）**：内置服务商 ID 为 `"opencode"`，协议族端点包括 `/inference/openai/v1`、`/inference/anthropic/v1`、`/inference/google/v1beta`（以及统一路径 `/inference/v1`）。
+   - **OpenCode Go（包月订阅模型）**：内置服务商 ID 为 `"opencode-go"`，协议族端点包括 `/inference/go/openai/v1`、`/inference/go/anthropic/v1`、`/inference/go/google/v1beta`（以及统一路径 `/inference/go/v1`，同时兼容旧版 `/zen/go/v1`）。
+   - **为什么 `"opencode"` 与 `"opencode-go"` 需要在 `models` 下配置模型级 `baseURL`？**
+     在 OpenCode v2.1.2+ 的最新官方目录（`models.opencode.ai/api.json`）中，单一协议服务商（`openai`、`anthropic`、`google`、`xai`、`openrouter`）的模型对象不包含 `provider.api`，只靠服务商顶层 `settings.baseURL` 即可代理全部模型；但跨协议族的 `"opencode"` 与 `"opencode-go"` 在**每一个模型对象内部都单独写入了 `model.provider.api`**（即模型级 `model.settings.baseURL`）。由于 OpenCode 合并配置时 `model.settings.baseURL` 优先级高于 `provider.settings.baseURL`，若只配服务商顶层 `baseURL` 而不覆盖 `models.<id>.settings.baseURL`，客户端会继续直连官方 `https://opencode.ai/inference/...` 而绕过代理！
+   - **切勿在 `"opencode"` 或 `"opencode-go"` 下覆写 `"package"`**：这两个内置服务商下的模型横跨多种协议栈（如 `beam-free`/`nemotron-3-ultra-free`/`kimi-k3` 使用 `@ai-sdk/openai-compatible` 的 `/chat/completions`，`gpt-6-luna`/`gpt-5.5`/`grok-4.7` 使用 `@ai-sdk/openai` 的 `/responses`，`claude-sonnet-4-6`/`claude-haiku-5-5` 使用 `@ai-sdk/anthropic` 的 `/messages`，`gemini-4-argon` 使用 `@ai-sdk/google` 的 `/models/<model>:generateContent`）。若在服务商顶层写死 `"package": "@opencode/ai/providers/openai-compatible"`，会清空模型自带的专属协议包，导致非 Chat Completions 模型请求失败。
 2. **第三方 SDK / 工具直接调用时的多协议族 `baseURL`**：
    - OpenAI Chat Completions & Responses：`https://your-domain.com/opencode/inference/openai/v1`（或 `.../opencode/inference/v1`）
    - Anthropic Messages：`https://your-domain.com/opencode/inference/anthropic/v1/messages`（或 `.../opencode/inference/v1/messages`）
@@ -432,6 +460,27 @@ npm test
      将代理部署在 Google 官方明确支持的国家/地区（如：美国、日本、新加坡、韩国、德国、英国等主流合规云数据中心）；
   2. **方案 2（在现有 VPS 上配置 Cloudflare WARP 出站解锁）**：
      若当前 VPS 无法更换，可在这台 VPS 上安装并配置 Cloudflare WARP 免费分流出站流量，将请求 Google / OpenAI 的出站流量经由合规节点转出，即可完美解除该地区限制。
+
+---
+
+### Q2: 在 OpenCode v2.1.2+ 中只配置了 `opencode-go` 的顶层 `baseURL`，为什么调用 `gpt-6-luna` 依然提示 `Country, region, or territory not supported`，调用 `beam-free` 返回 `403 Rejected`（后台日志显示 `country: "CN"`），而 `grok-4.7` 和 `claude-haiku-5-5` 却能返回 `200`？
+
+- **根本原因（请求实际未走代理，而是本机直连了 `opencode.ai`）**：
+  **这不是 `ai7proxy` 代理服务的故障，而是因为在 OpenCode v2.1.2+ 的最新官方目录（`models.opencode.ai/api.json`）中，跨协议族服务商 `"opencode"` 与 `"opencode-go"` 旗下的每一个模型对象内部都单独定义了模型级 `provider.api`（即 `model.settings.baseURL`，如 `https://opencode.ai/inference/go/openai/v1`、`https://opencode.ai/inference/go/anthropic/v1`）。**
+
+  当你在 `opencode.jsonc` 中只配置了服务商顶层的 `providers["opencode-go"].settings.baseURL` 而未在 `models` 下声明模型级 `settings.baseURL` 时，OpenCode v2.1.2+ 在计算模型最终配置（`Model.snapshot`）时执行的是 `merge(provider.settings, model.settings)`——**模型自带的官方直连 `model.settings.baseURL` 优先级更高，直接覆盖了服务商顶层的代理 `baseURL`**！
+
+- **四份后台日志现象完整还原**：
+  1. **日志中出现 `"country": "CN"` 且 `path` 为 `/inference/go/openai/v1/...`**：
+     直接证明客户端使用的是模型自带的官方地址 `https://opencode.ai/inference/go/...`，由本地电脑直连 `opencode.ai`，完全绕过了部署在海外 VPS 上的 `ai7proxy`。
+  2. **为什么直连情况下 `grok-4.7` 和 `claude-haiku-5-5` 返回 `200 OK`？**
+     因为 `opencode.ai` 托管于 Cloudflare，国内网络可直接握手，且 OpenCode Go 网关在向 xAI / Anthropic 转发这两个模型时未拦截 `CN` 来源 IP，从而造成“代理已经生效”的假象。
+  3. **为什么直连情况下 `beam-free`（`403 rejected`, `attemptCount: 0`）和 `gpt-6-luna`（`403 failed`, `Country, region, or territory not supported`）报错？**
+     - `Beam Free` 官方文档明确规定不支持中国地区（含港澳），`opencode.ai` 边缘网关识别到 `country: "CN"` 后在 25ms 内直接拒绝（`attemptCount: 0`）；
+     - `gpt-6-luna` 底层为 OpenAI 模型，直连传入 `CN` 地区信息后立即触发 OpenAI 上游的地区合规拦截。
+
+- **彻底解决建议**：
+  按照上方 **《🛠️ 在 OpenCode v2 客户端中配置使用》** 第 6、7 项的完整范例，在 `"opencode"` 和 `"opencode-go"` 的 `"models"` 字段下为你使用的模型显式指定 `"settings": { "baseURL": "https://your-domain.com/opencode/inference/..." }`（仅需覆盖 `settings.baseURL`，模型原有的 `package`、`variants` 思考档位、`capabilities` 与 `limit` 均会自动完整保留）。配置后可通过 `opencode api model.list` 验证各模型的 `settings.baseURL` 已指向你的代理域名。
 
 ---
 
