@@ -2,9 +2,7 @@
  
 > Raise the muzzle an inch higher.
 
-**`ai for proxy` 的第 7 个版本啊**
-
-`ai7proxy` 是在原有 [ai-proxy](https://github.com/egoist/ai-proxy) 基础上深度优化、全面重构与功能扩充的高性能透明代理服务。全面适配最新主流 AI 厂商（OpenAI、Anthropic、Google Gemini、OpenRouter、xAI Grok 等）以及最新 **OpenCode **官方 API 服务。
+**`ai for proxy` 的第 7 个版本**, `ai7proxy` 是在原有 [ai-proxy](https://github.com/egoist/ai-proxy) 基础上深度优化、全面重构与功能扩充的高性能透明代理服务。全面适配最新主流 AI 厂商（OpenAI、Anthropic、Google Gemini、OpenRouter、xAI Grok 等）以及最新 **OpenCode **官方 API 服务。
 
 ---
 
