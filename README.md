@@ -484,6 +484,15 @@ npm test
 
 ---
 
+## 推荐的VPS厂商
+我测试过几乎大多数常用的VPS，这里推荐的VPS厂商：
+- [RackNerd](https://my.racknerd.com/aff.php?aff=15169);
+- [BandwagonHost](https://bandwagonhost.com/aff.php?aff=79097);
+- [Vultr](https://www.vultr.com/?ref=9563359)
+
+由于默认安装项目ai7proxy，所有的交互信息会走您所购买的VPS，一些交互信息是可以被截取的，当然了你可以通过cloudflare来使用，但是免费Free的域名是有限制的。*特别需要注意的是*，如果VPS厂商后台读取您的网络流量日志，会把个人信息泄露出去的，以下罗列的是非常恶心的、偷偷地偷你跑的数据信息的VPS厂商：
+- [NovixLink](https://novixlink.com),**温馨提示：中华人名共和国内可直接连接购买！！!**
+
 ## 🛡️ License
 
 MIT License.
